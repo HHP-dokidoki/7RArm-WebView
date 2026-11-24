@@ -79,6 +79,19 @@ export function nearest<T>(points: T[], time: number, key: (point: T) => number)
   return lo > 0 && time - key(points[lo - 1]) < key(points[lo]) - time ? lo - 1 : lo;
 }
 
+export function editFrameRange(
+  frames: Frame[], start: number, end: number, operation: 'crop' | 'delete',
+): Frame[] {
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end >= frames.length || start > end) {
+    throw Error('选段无效');
+  }
+  const kept = operation === 'crop' ? frames.slice(start, end + 1) : [
+    ...frames.slice(0, start), ...frames.slice(end + 1),
+  ];
+  if (kept.length < 2) throw Error('轨迹至少需要两帧');
+  return kept.map((frame, i) => ({ q: frame.q.slice(), ms: i === kept.length - 1 ? 0 : frame.ms }));
+}
+
 export function frameTable(frames: Frame[], start: number[]): string {
   const rows = frames.map((frame, i) => {
     const angles = (i ? frame.q : start).map((angle) => `Angle{${angle.toExponential(8)}f}`).join(', ');

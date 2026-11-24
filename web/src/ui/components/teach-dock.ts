@@ -1,5 +1,5 @@
 import type { ArmRenderer } from '../../renderer';
-import { frameTable, nearest, parseRecording, resample, sample, splitTrack } from '../../teach';
+import { editFrameRange, frameTable, nearest, parseRecording, resample, sample, splitTrack } from '../../teach';
 import type { Frame, Preview, Sample } from '../../teach';
 import type { Side } from '../../types';
 
@@ -12,6 +12,7 @@ export class TeachDock {
   private source: Sample[] = [];
   private tracks: Sample[][] = [];
   private frames: Frame[] = [];
+  private undoEdit?: { frames: Frame[]; start: number; end: number; clock: number };
   private times: number[] = [];
   private preview: Preview | null = null;
   private request?: AbortController;
@@ -73,6 +74,11 @@ export class TeachDock {
         <span data-teach="range"></span>
         <label>段时长 ms <input class="form-input" type="number" min="1" data-teach="duration"></label>
         <button class="btn btn-secondary btn-sm" data-teach="apply" disabled>应用时长</button>
+      </div>
+      <div class="teach-range teach-edit-actions">
+        <button class="btn btn-secondary btn-sm" data-teach="crop" title="移除选段以外的帧" disabled>裁切到选段</button>
+        <button class="btn btn-secondary btn-sm" data-teach="delete" title="删除选段，至少保留两帧" disabled>删除选段</button>
+        <button class="btn btn-ghost btn-sm" data-teach="undo" disabled>撤销编辑</button>
       </div>`;
     this.renderer.onPickTeachFrame = (index) => {
       if (!this.visible || !this.preview) return;
@@ -114,6 +120,9 @@ export class TeachDock {
     this.input('scrub').oninput = () => { this.stop(); this.seek(this.input('scrub').valueAsNumber); };
     this.button('play').onclick = () => this.togglePlay();
     this.button('apply').onclick = () => this.applyDuration();
+    this.button('crop').onclick = () => this.editRange('crop');
+    this.button('delete').onclick = () => this.editRange('delete');
+    this.button('undo').onclick = () => this.restoreEdit();
     this.button('export').onclick = () => this.export();
     for (const end of [false, true]) this.bindHandle(end);
     for (let i = 0; i < 7; i++) {
@@ -129,6 +138,7 @@ export class TeachDock {
       input.onchange = () => {
         const current = this.pose();
         if (!current || current.index < 0) return;
+        this.rememberEdit();
         this.frames[current.index].q[i] = input.valueAsNumber * DEG;
         this.replan();
       };
@@ -164,7 +174,7 @@ export class TeachDock {
       this.liveShape = this.liveGeometry = undefined;
       this.button('record').textContent = '记录 side, q';
       if (captured?.length) this.useSamples(captured);
-      else { this.drawPaths(); this.drawPose(); }
+      else { this.sync(); this.drawPaths(); this.drawPose(); }
       return;
     }
     let socket: WebSocket;
@@ -172,6 +182,7 @@ export class TeachDock {
     catch { this.status('HostLink WebSocket 地址无效', true); return; }
     this.socket = socket;
     this.capture = [];
+    this.sync();
     this.stop();
     this.request?.abort();
     if (this.visible) this.renderer.clearTeach();
@@ -246,6 +257,7 @@ export class TeachDock {
     this.prepare();
   }
   private prepare(): void {
+    this.undoEdit = undefined;
     try {
       this.frames = resample(this.tracks[this.select('segments').selectedIndex] ?? [], this.input('step').valueAsNumber);
       this.start = this.clock = 0;
@@ -344,6 +356,10 @@ export class TeachDock {
   private sync(): void {
     const ready = !!this.preview;
     const ranged = this.frames.length > 1;
+    const selectedCount = this.end - this.start + 1;
+    this.button('crop').disabled = !ranged || !!this.capture || selectedCount === this.frames.length;
+    this.button('delete').disabled = !ranged || !!this.capture || this.frames.length - selectedCount < 2;
+    this.button('undo').disabled = !this.undoEdit || !!this.capture;
     for (const name of ['play', 'apply']) this.button(name).disabled = !ready;
     this.button('export').disabled = !ready || !!this.preview?.rejected;
     this.input('scrub').disabled = !ready;
@@ -388,6 +404,41 @@ export class TeachDock {
       update((end ? this.end : this.start) + (event.key === 'ArrowLeft' ? -1 : 1));
     };
   }
+  private rememberEdit(): void {
+    this.undoEdit = {
+      frames: this.frames.map((frame) => ({ q: frame.q.slice(), ms: frame.ms })),
+      start: this.start, end: this.end, clock: this.clock,
+    };
+  }
+  private restoreEdit(): void {
+    const previous = this.undoEdit;
+    if (!previous || this.capture) return;
+    this.undoEdit = undefined;
+    this.frames = previous.frames;
+    this.start = previous.start;
+    this.end = previous.end;
+    this.clock = previous.clock;
+    this.replan();
+  }
+  private editRange(operation: 'crop' | 'delete'): void {
+    if (this.capture) return;
+    try {
+      const replacement = editFrameRange(this.frames, this.start, this.end, operation);
+      this.rememberEdit();
+      this.frames = replacement;
+      if (operation === 'crop') {
+        this.start = 0;
+        this.end = this.frames.length - 1;
+      } else {
+        this.start = clamp(this.start - 1, 0, this.frames.length - 2);
+        this.end = this.start + 1;
+      }
+      this.clock = 0;
+      this.replan();
+    } catch (error) {
+      this.status((error as Error).message, true);
+    }
+  }
   private applyDuration(): void {
     const duration = this.input('duration').valueAsNumber;
     const intervals = this.end - this.start;
@@ -396,6 +447,7 @@ export class TeachDock {
       this.status('每个帧间隔至少 1 ms，整段最多 10 分钟', true);
       return;
     }
+    this.rememberEdit();
     for (let i = 0; i < intervals; i++) {
       this.frames[this.start + i].ms = Math.floor((i + 1) * duration / intervals) - Math.floor(i * duration / intervals);
     }

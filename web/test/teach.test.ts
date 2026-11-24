@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { frameTable, parseRecording, resample, splitTrack } from '../src/teach';
+import { editFrameRange, frameTable, parseRecording, resample, splitTrack } from '../src/teach';
 
 const header = 'mcu_us,host_t,v0,v1,v2,v3,v4,v5,v6,v7';
 const row = (us: number, side: number, q: number) => `${us},1,${side},${q},-0.7,0,0.8,0,0,0`;
@@ -20,6 +20,23 @@ describe('HostLink recordings', () => {
     const frames = resample(result.samples, 120);
     expect(frames.map(frame => frame.q[0])).toEqual([0, 0.5, 1]);
     expect(frames.map(frame => frame.ms)).toEqual([103, 102, 0]);
+  });
+
+  it('crops inclusively and removes the outgoing interval of the new last frame', () => {
+    const frames = [10, 20, 30, 40, 0].map((ms, i) => ({ q: [i], ms }));
+    const result = editFrameRange(frames, 1, 3, 'crop');
+    expect(result).toEqual([{ q: [1], ms: 20 }, { q: [2], ms: 30 }, { q: [3], ms: 0 }]);
+    result[0].q[0] = 99;
+    expect(frames[1]).toEqual({ q: [1], ms: 20 });
+  });
+
+  it('removes selected frames, preserves adjacent intervals and rejects a one-frame result', () => {
+    const frames = [10, 20, 30, 40, 0].map((ms, i) => ({ q: [i], ms }));
+    expect(editFrameRange(frames, 1, 2, 'delete')).toEqual([
+      { q: [0], ms: 10 }, { q: [3], ms: 40 }, { q: [4], ms: 0 },
+    ]);
+    expect(editFrameRange(frames, 3, 4, 'delete').at(-1)?.ms).toBe(0);
+    expect(() => editFrameRange(frames, 0, 3, 'delete')).toThrow('至少需要两帧');
   });
 
   it('exports scoped aliases and frame intervals in microseconds', () => {

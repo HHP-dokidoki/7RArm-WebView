@@ -1115,3 +1115,5 @@ body {
 .teach-dock [role=status] { font-size: 12px; }
 .teach-dock [data-error=true] { color: var(--status-danger); }
 @media(max-width: 720px) { .teach-dock { width: 230px; flex-basis: 230px; } .teach-range { flex-wrap: wrap; } }
+
+.teach-edit-actions { justify-content: flex-end; padding-top: 0; }
