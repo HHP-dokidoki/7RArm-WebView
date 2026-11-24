@@ -85,11 +85,40 @@ export function editFrameRange(
   if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end >= frames.length || start > end) {
     throw Error('选段无效');
   }
-  const kept = operation === 'crop' ? frames.slice(start, end + 1) : [
-    ...frames.slice(0, start), ...frames.slice(end + 1),
-  ];
-  if (kept.length < 2) throw Error('轨迹至少需要两帧');
-  return kept.map((frame, i) => ({ q: frame.q.slice(), ms: i === kept.length - 1 ? 0 : frame.ms }));
+  if (operation === 'delete') {
+    return deleteFrames(frames, new Set(Array.from({ length: end - start + 1 }, (_, i) => start + i)));
+  }
+  return copyTrack(frames.slice(start, end + 1));
+}
+
+function copyTrack(frames: Frame[]): Frame[] {
+  if (frames.length < 2) throw Error('轨迹至少需要两帧');
+  return frames.map((frame, i) => ({ q: frame.q.slice(), ms: i === frames.length - 1 ? 0 : frame.ms }));
+}
+
+export function deleteFrames(frames: Frame[], indices: ReadonlySet<number>): Frame[] {
+  return copyTrack(frames.filter((_, i) => !indices.has(i)));
+}
+
+// An interior insertion retains the interval leading out of the preceding frame.
+// The extra interval connects the new segment back to the original path.
+export function insertFrames(frames: Frame[], index: number, additions: Frame[], interval: number): Frame[] {
+  const addedDuration = additions.slice(0, -1).reduce((sum, frame) => sum + frame.ms, interval);
+  if (!Number.isInteger(index) || index < 0 || index > frames.length || frames.length < 2 ||
+      !additions.length || frames.length + additions.length > 10000 ||
+      additions.some(({ q }) => q.length !== 7 || !q.every(Number.isFinite)) ||
+      !Number.isInteger(interval) || interval < 1 ||
+      frames.reduce((sum, frame) => sum + frame.ms, addedDuration) > 600000) {
+    throw Error('请输入有效的七轴角度和正整数衔接间隔，整段最长 10 分钟、最多 10000 帧');
+  }
+  const result = frames.map((frame) => ({ q: frame.q.slice(), ms: frame.ms }));
+  const appended = index === result.length;
+  if (appended) result[index - 1].ms = interval;
+  result.splice(index, 0, ...additions.map((frame, i) => ({
+    q: frame.q.slice(),
+    ms: i < additions.length - 1 ? frame.ms : appended ? 0 : interval,
+  })));
+  return result;
 }
 
 export function frameTable(frames: Frame[], start: number[]): string {

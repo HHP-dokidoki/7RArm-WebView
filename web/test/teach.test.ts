@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { editFrameRange, frameTable, parseRecording, resample, splitTrack } from '../src/teach';
+import { deleteFrames, editFrameRange, frameTable, insertFrames, parseRecording, resample, splitTrack } from '../src/teach';
 
 const header = 'mcu_us,host_t,v0,v1,v2,v3,v4,v5,v6,v7';
 const row = (us: number, side: number, q: number) => `${us},1,${side},${q},-0.7,0,0.8,0,0,0`;
@@ -37,6 +37,25 @@ describe('HostLink recordings', () => {
     ]);
     expect(editFrameRange(frames, 3, 4, 'delete').at(-1)?.ms).toBe(0);
     expect(() => editFrameRange(frames, 0, 3, 'delete')).toThrow('至少需要两帧');
+  });
+
+  it('deletes disjoint point and segment selections together', () => {
+    const frames = [10, 20, 30, 40, 50, 0].map((ms, i) => ({ q: [i], ms }));
+    expect(deleteFrames(frames, new Set([1, 3, 4]))).toEqual([
+      { q: [0], ms: 10 }, { q: [2], ms: 30 }, { q: [5], ms: 0 },
+    ]);
+  });
+
+  it('can insert an interior point, prepend a segment or append a segment', () => {
+    const q = (j0: number) => [j0, 0, 0, 0, 0, 0, 0];
+    const frames = [{ q: q(0), ms: 120 }, { q: q(1), ms: 0 }];
+    const point = { q: q(0.5), ms: 0 };
+    const segment = [{ q: q(1), ms: 100 }, { q: q(2), ms: 0 }];
+    expect(insertFrames(frames, 1, [point], 40).map(frame => [frame.q[0], frame.ms]))
+      .toEqual([[0, 120], [0.5, 40], [1, 0]]);
+    expect(insertFrames(frames, 0, segment, 60).map(frame => frame.ms)).toEqual([100, 60, 120, 0]);
+    expect(insertFrames(frames, 2, segment, 60).map(frame => frame.ms)).toEqual([120, 60, 100, 0]);
+    expect(frames[1].ms).toBe(0);
   });
 
   it('exports scoped aliases and frame intervals in microseconds', () => {

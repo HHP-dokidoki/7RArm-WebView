@@ -1117,3 +1117,13 @@ body {
 @media(max-width: 720px) { .teach-dock { width: 230px; flex-basis: 230px; } .teach-range { flex-wrap: wrap; } }
 
 .teach-edit-actions { justify-content: flex-end; padding-top: 0; }
+
+.teach-batch { flex-wrap: wrap; }
+.teach-marks { position: absolute; inset: 0; pointer-events: none; }
+.teach-marks span { position: absolute; bottom: 1px; height: 4px; min-width: 4px; border-radius: 2px; background: #f14367; }
+.teach-waypoint-dialog { width: min(420px, 94vw); margin: auto; padding: 18px; color: var(--text-primary); background: var(--bg-panel, var(--bg-surface, Canvas)); border: 1px solid var(--border-color); border-radius: 10px; }
+.teach-waypoint-dialog::backdrop { background: #15213788; }
+.teach-waypoint-dialog form { display: grid; gap: 12px; }
+.teach-waypoint-dialog h2 { font-size: 16px; }
+.teach-waypoint-dialog label { display: grid; gap: 4px; }
+.teach-waypoint-dialog p { color: var(--status-danger); }

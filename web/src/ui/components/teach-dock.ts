@@ -1,5 +1,5 @@
 import type { ArmRenderer } from '../../renderer';
-import { editFrameRange, frameTable, nearest, parseRecording, resample, sample, splitTrack } from '../../teach';
+import { deleteFrames, editFrameRange, frameTable, insertFrames, nearest, parseRecording, resample, sample, splitTrack } from '../../teach';
 import type { Frame, Preview, Sample } from '../../teach';
 import type { Side } from '../../types';
 
@@ -12,7 +12,12 @@ export class TeachDock {
   private source: Sample[] = [];
   private tracks: Sample[][] = [];
   private frames: Frame[] = [];
-  private undoEdit?: { frames: Frame[]; start: number; end: number; clock: number };
+  private selected = new Set<number>();
+  private undoEdit?: {
+    frames: Frame[]; start: number; end: number; clock: number; selected: Set<number>; safe: boolean;
+  };
+  private waypointDialog!: HTMLDialogElement;
+  private waypointFrame = 0;
   private times: number[] = [];
   private preview: Preview | null = null;
   private request?: AbortController;
@@ -68,6 +73,7 @@ export class TeachDock {
         <span>选段</span>
         <div class="teach-band" data-teach="band">
           <div class="teach-selected" data-teach="selected"></div>
+          <div class="teach-marks" data-teach="marks"></div>
           <button data-teach="from" aria-label="拖动起点" disabled>‹</button>
           <button data-teach="to" aria-label="拖动终点" disabled>›</button>
         </div>
@@ -79,15 +85,27 @@ export class TeachDock {
         <button class="btn btn-secondary btn-sm" data-teach="crop" title="移除选段以外的帧" disabled>裁切到选段</button>
         <button class="btn btn-secondary btn-sm" data-teach="delete" title="删除选段，至少保留两帧" disabled>删除选段</button>
         <button class="btn btn-ghost btn-sm" data-teach="undo" disabled>撤销编辑</button>
+      </div>
+      <div class="teach-range teach-edit-actions teach-batch">
+        <button class="btn btn-secondary btn-sm" data-teach="mark-point" disabled>标记当前点</button>
+        <button class="btn btn-secondary btn-sm" data-teach="mark-range" disabled>标记选段</button>
+        <span data-teach="marked-count" aria-live="polite">已标记 0 帧</span>
+        <button class="btn btn-secondary btn-sm" data-teach="batch-delete" disabled>批量删除</button>
+        <button class="btn btn-ghost btn-sm" data-teach="clear-marks" disabled>清空标记</button>
+        <button class="btn btn-primary btn-sm" data-teach="waypoint" disabled>添加姿态点</button>
+        <button class="btn btn-secondary btn-sm" data-teach="copy-range" title="把当前选段复制到播放游标之后" disabled>插入选段副本</button>
+        <button class="btn btn-secondary btn-sm" data-teach="match-end" disabled>终点对齐起点</button>
       </div>`;
-    this.renderer.onPickTeachFrame = (index) => {
+    this.renderer.onPickTeachFrame = (index, toggleSelection) => {
       if (!this.visible || !this.preview) return;
       this.stop();
       this.select('pose').value = 'recorded';
       this.seek(this.times[index]);
+      if (toggleSelection && !this.capture) this.togglePoint(index);
     };
     workspace.append(this.panel);
     root.append(this.timeline);
+    this.setupWaypointDialog(root);
     this.input('file').onchange = () => {
       const input = this.input('file');
       const file = input.files?.[0];
@@ -123,6 +141,23 @@ export class TeachDock {
     this.button('crop').onclick = () => this.editRange('crop');
     this.button('delete').onclick = () => this.editRange('delete');
     this.button('undo').onclick = () => this.restoreEdit();
+    this.button('mark-point').onclick = () => this.togglePoint(this.currentFrame());
+    this.button('mark-range').onclick = () => {
+      for (let i = this.start; i <= this.end; i++) this.selected.add(i);
+      this.syncMarks();
+    };
+    this.button('clear-marks').onclick = () => { this.selected.clear(); this.syncMarks(); };
+    this.button('batch-delete').onclick = () => this.deleteSelection();
+    this.button('waypoint').onclick = () => this.openWaypoint();
+    this.button('copy-range').onclick = () => {
+      try {
+        this.insertTrack(this.currentFrame() + 1, this.frames.slice(this.start, this.end + 1),
+          this.input('step').valueAsNumber);
+      } catch (error) {
+        this.status((error as Error).message, true);
+      }
+    };
+    this.button('match-end').onclick = () => this.matchEndpoints();
     this.button('export').onclick = () => this.export();
     for (const end of [false, true]) this.bindHandle(end);
     for (let i = 0; i < 7; i++) {
@@ -161,7 +196,7 @@ export class TeachDock {
     this.panel.hidden = this.timeline.hidden = !visible;
     this.stop();
     if (visible) { this.drawPaths(); this.drawPose(); }
-    else this.renderer.clearTeach();
+    else { this.waypointDialog.close(); this.renderer.clearTeach(); }
   }
 
   private toggleRecord(): void {
@@ -258,6 +293,7 @@ export class TeachDock {
   }
   private prepare(): void {
     this.undoEdit = undefined;
+    this.selected.clear();
     try {
       this.frames = resample(this.tracks[this.select('segments').selectedIndex] ?? [], this.input('step').valueAsNumber);
       this.start = this.clock = 0;
@@ -351,7 +387,7 @@ export class TeachDock {
     }
   }
   private drawPaths(): void {
-    if (this.visible && this.preview) this.renderer.setTeachPaths(this.preview, this.start, this.end);
+    if (this.visible && this.preview) this.renderer.setTeachPaths(this.preview, this.start, this.end, this.selected);
   }
   private sync(): void {
     const ready = !!this.preview;
@@ -374,6 +410,7 @@ export class TeachDock {
     this.button('from').style.left = this.element('selected').style.left = `${start}%`;
     this.button('to').style.left = `${end}%`;
     this.element('selected').style.width = `${end - start}%`;
+    this.syncMarks();
   }
   private seek(time: number): void {
     this.clock = clamp(time, 0, this.maxTime());
@@ -404,10 +441,129 @@ export class TeachDock {
       update((end ? this.end : this.start) + (event.key === 'ArrowLeft' ? -1 : 1));
     };
   }
+  private currentFrame(): number {
+    return nearest(this.times, this.clock, (time) => time);
+  }
+
+  private togglePoint(index: number): void {
+    if (this.selected.has(index)) this.selected.delete(index);
+    else this.selected.add(index);
+    this.syncMarks();
+  }
+
+  private syncMarks(): void {
+    const editable = !!this.preview && !this.capture;
+    for (const key of ['mark-point', 'mark-range', 'waypoint', 'copy-range', 'match-end']) this.button(key).disabled = !editable;
+    this.button('clear-marks').disabled = this.selected.size === 0;
+    this.button('batch-delete').disabled = !editable || !this.selected.size ||
+      this.frames.length - this.selected.size < 2;
+    this.element('marked-count').textContent = `已标记 ${this.selected.size} 帧`;
+    const marks = document.createDocumentFragment();
+    const sorted = [...this.selected].sort((a, b) => a - b);
+    for (let i = 0; i < sorted.length; i++) {
+      const first = sorted[i];
+      while (i + 1 < sorted.length && sorted[i + 1] === sorted[i] + 1) i++;
+      const mark = document.createElement('span');
+      const start = this.times[first] / this.maxTime() * 100;
+      mark.style.left = `${start}%`;
+      mark.style.width = `${this.times[sorted[i]] / this.maxTime() * 100 - start}%`;
+      marks.append(mark);
+    }
+    this.element('marks').replaceChildren(marks);
+    if (this.visible && this.preview) this.renderer.setTeachSelection(this.selected);
+  }
+
+  private deleteSelection(): void {
+    const first = Math.min(...this.selected);
+    const remaining = deleteFrames(this.frames, this.selected);
+    this.rememberEdit();
+    this.frames = remaining;
+    this.selected.clear();
+    this.start = clamp(first - 1, 0, remaining.length - 2);
+    this.end = this.start + 1;
+    this.clock = 0;
+    this.replan();
+  }
+
+  private insertTrack(index: number, additions: Frame[], interval: number): void {
+    const result = insertFrames(this.frames, index, additions, interval);
+    this.rememberEdit();
+    this.frames = result;
+    if (index === 0) this.input('safe').checked = false;
+    this.selected = new Set([...this.selected].map((i) => i < index ? i : i + additions.length));
+    this.start = Math.min(index, this.frames.length - 2);
+    this.end = Math.max(this.start + 1, index + additions.length - 1);
+    this.clock = this.frames.slice(0, index).reduce((t, frame) => t + Math.floor(frame.ms / 2) * 2 + 2, 0) / 1000;
+    this.select('pose').value = 'recorded';
+    this.replan();
+  }
+
+  private setupWaypointDialog(root: HTMLElement): void {
+    this.waypointDialog = document.createElement('dialog');
+    this.waypointDialog.className = 'teach-waypoint-dialog';
+    this.waypointDialog.innerHTML = `
+      <form method="dialog">
+        <h2>添加姿态点</h2>
+        <label>插入位置<select class="form-select" name="position">
+          <option value="after">当前采样帧之后</option><option value="first">作为起点</option>
+          <option value="last">作为终点</option>
+        </select></label>
+        <label>衔接间隔 ms<input class="form-input" name="interval" type="number" min="1" step="1" required></label>
+        <div class="teach-fields">${Array.from({ length: 7 }, (_, axis) =>
+          `<label>J${axis} °<input class="form-input" name="j${axis}" type="number" step="any" required></label>`).join('')}</div>
+        <p role="status"></p>
+        <div class="teach-row">
+          <button class="btn btn-primary btn-sm" value="add">添加并规划</button>
+          <button class="btn btn-secondary btn-sm" value="cancel" formnovalidate>取消</button>
+        </div>
+      </form>`;
+    this.waypointDialog.querySelector('form')!.onsubmit = (event) => {
+      if ((event.submitter as HTMLButtonElement | null)?.value === 'cancel') return;
+      event.preventDefault();
+      const form = new FormData(event.currentTarget as HTMLFormElement);
+      const position = form.get('position');
+      const index = position === 'first' ? 0 : position === 'last' ? this.frames.length : this.waypointFrame + 1;
+      const q = Array.from({ length: 7 }, (_, axis) => Number(form.get(`j${axis}`)) * DEG);
+      try {
+        this.insertTrack(index, [{ q, ms: 0 }], Number(form.get('interval')));
+        this.waypointDialog.close();
+      } catch (error) {
+        this.waypointDialog.querySelector('p')!.textContent = (error as Error).message;
+      }
+    };
+    root.append(this.waypointDialog);
+  }
+
+  private openWaypoint(): void {
+    const current = this.pose();
+    if (!current || !this.preview) return;
+    this.stop();
+    this.waypointFrame = this.currentFrame();
+    const form = this.waypointDialog.querySelector('form')!;
+    form.reset();
+    const q = current.index === 0 && this.input('safe').checked ? this.preview.start : current.q;
+    q.forEach((angle, axis) => {
+      (form.elements.namedItem(`j${axis}`) as HTMLInputElement).value = (angle / DEG).toFixed(4);
+    });
+    (form.elements.namedItem('interval') as HTMLInputElement).value = this.input('step').value;
+    form.querySelector('p')!.textContent = '';
+    this.waypointDialog.showModal();
+  }
+
+  private matchEndpoints(): void {
+    if (!this.preview) return;
+    this.rememberEdit();
+    this.frames[this.frames.length - 1].q = this.preview.start.slice();
+    this.clock = this.times[this.frames.length - 1];
+    this.select('pose').value = 'recorded';
+    this.replan();
+  }
+
   private rememberEdit(): void {
     this.undoEdit = {
       frames: this.frames.map((frame) => ({ q: frame.q.slice(), ms: frame.ms })),
       start: this.start, end: this.end, clock: this.clock,
+      selected: new Set(this.selected), safe: this.input('safe').checked,
     };
   }
   private restoreEdit(): void {
@@ -418,6 +574,8 @@ export class TeachDock {
     this.start = previous.start;
     this.end = previous.end;
     this.clock = previous.clock;
+    this.selected = previous.selected;
+    this.input('safe').checked = previous.safe;
     this.replan();
   }
   private editRange(operation: 'crop' | 'delete'): void {
@@ -426,6 +584,7 @@ export class TeachDock {
       const replacement = editFrameRange(this.frames, this.start, this.end, operation);
       this.rememberEdit();
       this.frames = replacement;
+      this.selected.clear();
       if (operation === 'crop') {
         this.start = 0;
         this.end = this.frames.length - 1;

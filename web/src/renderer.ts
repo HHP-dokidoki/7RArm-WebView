@@ -42,7 +42,8 @@ export class ArmRenderer {
   private teachActive = false;
   private teachPoints: THREE.Vector3[] = [];
   private pickDown?: { x: number; y: number };
-  onPickTeachFrame?: (index: number) => void;
+  private teachSelection?: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>;
+  onPickTeachFrame?: (index: number, toggleSelection: boolean) => void;
 
   private targetCamPos = new THREE.Vector3();
   private targetCamTarget = new THREE.Vector3();
@@ -134,7 +135,7 @@ export class ArmRenderer {
         const next = Math.hypot(x - event.clientX, y - event.clientY);
         if (next < distance) { distance = next; selected = i; }
       });
-      if (selected >= 0) this.onPickTeachFrame?.(selected);
+      if (selected >= 0) this.onPickTeachFrame?.(selected, event.ctrlKey || event.metaKey || event.shiftKey);
     });
 
     // Lights
@@ -365,7 +366,7 @@ export class ArmRenderer {
     return nowVisible;
   }
 
-  setTeachPaths(preview: Preview, start: number, end: number): void {
+  setTeachPaths(preview: Preview, start: number, end: number, selected: ReadonlySet<number>): void {
     this.removeTeachPaths();
     const project = (point: [number, number, number, number, ...unknown[]]) =>
       new THREE.Vector3(point[1], point[2], point[3]).multiplyScalar(1000);
@@ -382,6 +383,24 @@ export class ArmRenderer {
       this.teachLines.push(line);
       this.scene.add(line);
     }
+    this.setTeachSelection(selected);
+  }
+
+  setTeachSelection(selected: ReadonlySet<number>): void {
+    if (this.teachSelection) {
+      this.scene.remove(this.teachSelection);
+      this.teachSelection.geometry.dispose();
+      this.teachSelection.material.dispose();
+      this.teachSelection = undefined;
+    }
+    const points = [...selected].flatMap((i) => this.teachPoints[i] ? [this.teachPoints[i]] : []);
+    if (!points.length) return;
+    this.teachSelection = new THREE.Points(
+      new THREE.BufferGeometry().setFromPoints(points),
+      new THREE.PointsMaterial({ color: 0xf14367, size: 7, sizeAttenuation: false, depthTest: false }),
+    );
+    this.teachSelection.renderOrder = 11;
+    this.scene.add(this.teachSelection);
   }
 
   private removeTeachPaths(): void {
@@ -392,6 +411,7 @@ export class ArmRenderer {
     }
     this.teachLines = [];
     this.teachPoints = [];
+    this.setTeachSelection(new Set());
   }
 
   clearTeach(): void {
