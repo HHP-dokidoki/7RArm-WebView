@@ -13,6 +13,32 @@ Python、MuJoCo 或后端服务。
 - 左右臂独立五次速度规划与速度/加速度限幅
 - Three.js 简化刚体显示
 
+## HostLink 示教扩展
+
+示教模式复用当前固件的模型和位控规划器。初始化 `dc-unit-01-d` 的子模块后，从本仓库根目录执行：
+
+```bash
+cmake -S native -B native/build -DFIRMWARE_ROOT=/path/to/dc-unit-01-d -DCMAKE_BUILD_TYPE=Release
+cmake --build native/build
+npm --prefix web ci
+npm --prefix web run dev:teach
+```
+
+打开 http://127.0.0.1:5182/?teach。顶部「HostLink 示教」按钮可在示教和原控制台间切换。
+可用 `HOSTLINK_TRAJECTORY_BIN` 指定兼容的预览程序。示教通过本地 Vite 调用原生程序，
+原控制台的 WASM 功能仍支持现有静态部署。
+
+- 导入 `side_q.csv` 或打开「实时记录」，连接启用了 WebSocket 的 hostlinkd。
+  进入固件 Test/Teach 并开启 debug 后，点击「记录 side, q」；停止后预览。
+- MCU 时间戳回退时按侧拆段。选择录制段和采样间隔，可用固件 resetSafe 作为规划首帧。
+- 拖动时间轴查看姿态，点击采样轨迹选帧，拖动右侧 J0–J6 滑块编辑离线帧。
+  视口支持左键或中键旋转、右键平移和滚轮缩放。
+- 拖动选段两端，修改帧提交间隔的总时长，再导出 `MoveSegment`。
+  灰色为采样路径、绿色为规划路径、橙色为选段。
+- `v0` 对应固件侧别。可交换界面上的现场左右叫法，模型与排序仍跟随该侧的固件参数。
+
+示教视口使用当前固件的关节中心、关节轴和工具姿态，外观沿用原有简化网格。
+
 ## 目录
 
 ```text
