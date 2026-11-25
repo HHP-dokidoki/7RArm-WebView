@@ -135,6 +135,46 @@ export function insertFrames(frames: Frame[], index: number, additions: Frame[],
   return result;
 }
 
+export function smoothFrames(frames: Frame[], start: number, end: number, windowMs: number): Frame[] {
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end >= frames.length || end - start < 2) {
+    throw Error('平滑至少需要三帧');
+  }
+  if (!Number.isInteger(windowMs) || windowMs < 20 || windowMs > 5000) {
+    throw Error('平滑窗口须为 20–5000 ms 的整数');
+  }
+  let elapsed = 0;
+  const times = frames.map(({ ms }) => {
+    const time = elapsed;
+    elapsed += ms;
+    return time;
+  });
+  const result = frames.slice();
+  const radius = windowMs / 2;
+  let left = start;
+  for (let right = start + 1; right <= end; right++) {
+    // Each retained endpoint of a deletion bridge is a smoothing boundary.
+    if (right < end && !frames[right].settle) continue;
+    let first = left;
+    for (let i = left + 1; i < right; i++) {
+      const time = times[i];
+      while (times[first] < time - radius) first++;
+      const average = frames[i].q.map(() => 0);
+      let totalWeight = 0;
+      for (let j = first; j <= right && times[j] <= time + radius; j++) {
+        const distance = (times[j] - time) / radius;
+        const weight = Math.exp(-2 * distance * distance);
+        totalWeight += weight;
+        frames[j].q.forEach((angle, axis) => { average[axis] += angle * weight; });
+      }
+      const blend = Math.min(1, (time - times[left]) / radius, (times[right] - time) / radius);
+      result[i] = { ...frames[i], q: frames[i].q.map((angle, axis) =>
+        angle + blend * (average[axis] / totalWeight - angle)) };
+    }
+    left = right;
+  }
+  return result;
+}
+
 export function interpolatePlanned(points: Planned[], time: number): number[] {
   const near = nearest(points, time, (point) => point[0]);
   const right = points[near][0] < time ? near + 1 : near;

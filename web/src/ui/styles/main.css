@@ -1130,3 +1130,6 @@ body {
 
 .viewport-canvas-host canvas.teach-curve-cursor { cursor: crosshair; }
 [data-teach="drag-curve"][aria-pressed="true"] { color: var(--left-arm-primary); border-color: var(--border-focus); }
+
+.teach-smoothing { display: grid; gap: 6px; padding-top: 10px; border-top: 1px solid var(--border-color); }
+.teach-smoothing small { color: var(--text-secondary); }

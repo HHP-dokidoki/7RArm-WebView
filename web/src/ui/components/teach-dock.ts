@@ -1,5 +1,5 @@
 import type { ArmRenderer } from '../../renderer';
-import { deleteFrames, editFrameRange, frameTable, insertFrames, interpolatePlanned, nearest, parseRecording, resample, sample, splitTrack } from '../../teach';
+import { deleteFrames, editFrameRange, frameTable, insertFrames, interpolatePlanned, nearest, parseRecording, resample, sample, smoothFrames, splitTrack } from '../../teach';
 import type { Frame, Preview, Sample } from '../../teach';
 import type { Side } from '../../types';
 
@@ -61,6 +61,17 @@ export class TeachDock {
       <div class="teach-joints">${Array.from({ length: 7 }, (_, i) => `
         <label>J${i}<input type="range" min="-180" max="270" step="0.1" data-teach="joint-${i}" disabled>
         <output data-teach="angle-${i}">—</output></label>`).join('')}</div>
+      <div class="teach-smoothing">
+        <h3>轨迹平滑</h3>
+        <div class="teach-fields">
+          <label>范围<select class="form-select" data-teach="smooth-scope">
+            <option value="all">整条轨迹</option><option value="range">当前选段</option>
+          </select></label>
+          <label>窗口 ms<input class="form-input" data-teach="smooth-window" type="number" min="20" max="5000" step="1" value="600"></label>
+        </div>
+        <small>窗口越大，抑制的波折越多。保留范围首尾和删段衔接点。</small>
+        <button class="btn btn-secondary btn-sm" data-teach="smooth" disabled>平滑并重新规划</button>
+      </div>
       <button class="btn btn-primary btn-sm" data-teach="export" disabled>导出 MoveSegment</button>
       <p data-teach="status" role="status">导入 CSV、加载示例，或在 Teach 模式下开始记录。</p>`;
     this.timeline.innerHTML = `
@@ -150,6 +161,8 @@ export class TeachDock {
     this.input('scrub').oninput = () => { this.stop(); this.seek(this.input('scrub').valueAsNumber); };
     this.button('play').onclick = () => this.togglePlay();
     this.button('apply').onclick = () => this.applyDuration();
+    this.button('smooth').onclick = () => this.smooth();
+    this.select('smooth-scope').onchange = () => this.syncMarks();
     this.button('crop').onclick = () => this.editRange('crop');
     this.button('delete').onclick = () => this.editRange('delete');
     this.button('undo').onclick = () => this.restoreEdit();
@@ -473,6 +486,8 @@ export class TeachDock {
   private syncMarks(): void {
     const editable = !!this.preview && !this.capture;
     for (const key of ['mark-point', 'mark-range', 'waypoint', 'copy-range', 'match-end']) this.button(key).disabled = !editable;
+    const markedRange = this.select('smooth-scope').value === 'range';
+    this.button('smooth').disabled = !editable || (markedRange ? this.end - this.start < 2 : this.frames.length < 3);
     this.button('drag-curve').disabled = !editable;
     if (!editable) this.setCurveSelection(false);
     this.button('clear-marks').disabled = this.selected.size === 0;
@@ -621,6 +636,22 @@ export class TeachDock {
       this.status((error as Error).message, true);
     }
   }
+  private smooth(): void {
+    if (!this.preview || this.capture) return;
+    const windowMs = this.input('smooth-window').valueAsNumber;
+    const range = this.select('smooth-scope').value === 'range';
+    try {
+      const replacement = smoothFrames(this.frames, range ? this.start : 0,
+        range ? this.end : this.frames.length - 1, windowMs);
+      this.rememberEdit();
+      this.frames = replacement;
+      this.select('pose').value = 'planned';
+      this.replan();
+    } catch (error) {
+      this.status((error as Error).message, true);
+    }
+  }
+
   private applyDuration(): void {
     const duration = this.input('duration').valueAsNumber;
     const intervals = this.end - this.start;

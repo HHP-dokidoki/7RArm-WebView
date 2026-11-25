@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deleteFrames, editFrameRange, frameTable, insertFrames, interpolatePlanned, parseRecording, resample, splitTrack } from '../src/teach';
+import { deleteFrames, editFrameRange, frameTable, insertFrames, interpolatePlanned, parseRecording, resample, smoothFrames, splitTrack } from '../src/teach';
 
 const header = 'mcu_us,host_t,v0,v1,v2,v3,v4,v5,v6,v7';
 const row = (us: number, side: number, q: number) => `${us},1,${side},${q},-0.7,0,0.8,0,0,0`;
@@ -56,6 +56,26 @@ describe('HostLink recordings', () => {
     expect(insertFrames(frames, 0, segment, 60).map(frame => frame.ms)).toEqual([100, 60, 120, 0]);
     expect(insertFrames(frames, 2, segment, 60).map(frame => frame.ms)).toEqual([120, 60, 100, 0]);
     expect(frames[1].ms).toBe(0);
+  });
+
+  it('reduces alternating noise while preserving endpoints, bridge points and frame intervals', () => {
+    const frames = [0, 1, -1, 1, -1, 1, 0].map((q, i) =>
+      ({ q: [q], ms: i === 6 ? 0 : 100, settle: i === 3 }));
+    const result = smoothFrames(frames, 0, 6, 600);
+    expect(result[2].q[0]).toBeGreaterThan(-1);
+    expect(result[4].q[0]).toBeGreaterThan(-1);
+    expect(result[3]).toEqual(frames[3]);
+    expect(result[0]).toEqual(frames[0]);
+    expect(result[6]).toEqual(frames[6]);
+    expect(result.map(({ ms }) => ms)).toEqual(frames.map(({ ms }) => ms));
+    expect(frames[2].q[0]).toBe(-1);
+  });
+
+  it('does not change samples outside a selected range', () => {
+    const frames = [0, 0, 1, 0, 0].map((q, i) => ({ q: [q], ms: i === 4 ? 0 : 100 }));
+    const result = smoothFrames(frames, 1, 3, 500);
+    expect(result.map(({ q }) => q[0])).toEqual([0, 0, expect.any(Number), 0, 0]);
+    expect(result[2].q[0]).toBeLessThan(1);
   });
 
   it('interpolates between the planner samples during playback', () => {
