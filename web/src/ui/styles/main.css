@@ -1127,3 +1127,6 @@ body {
 .teach-waypoint-dialog h2 { font-size: 16px; }
 .teach-waypoint-dialog label { display: grid; gap: 4px; }
 .teach-waypoint-dialog p { color: var(--status-danger); }
+
+.viewport-canvas-host canvas.teach-curve-cursor { cursor: crosshair; }
+[data-teach="drag-curve"][aria-pressed="true"] { color: var(--left-arm-primary); border-color: var(--border-focus); }

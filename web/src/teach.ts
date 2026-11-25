@@ -1,11 +1,12 @@
 export type Sample = { us: number; side: number; q: number[] };
-export type Frame = { q: number[]; ms: number };
+export type Frame = { q: number[]; ms: number; settle?: boolean };
 export type Vec = [number, number, number];
 export type Recorded = [number, ...Vec];
 export type Planned = [number, ...Vec, number[]];
 export type Preview = {
   start: number[]; model: number[][]; tcpHome: Vec; tcpBasis: Vec[];
   recorded: Recorded[]; planned: Planned[]; submitted: number; end: number; rejected: number;
+  intervals: number[]; frameTimes: number[];
 };
 
 export function sample(us: unknown, side: unknown, q: unknown[]): Sample | null {
@@ -93,11 +94,23 @@ export function editFrameRange(
 
 function copyTrack(frames: Frame[]): Frame[] {
   if (frames.length < 2) throw Error('轨迹至少需要两帧');
-  return frames.map((frame, i) => ({ q: frame.q.slice(), ms: i === frames.length - 1 ? 0 : frame.ms }));
+  return frames.map((frame, i) => ({ ...frame, q: frame.q.slice(), ms: i === frames.length - 1 ? 0 : frame.ms }));
 }
 
 export function deleteFrames(frames: Frame[], indices: ReadonlySet<number>): Frame[] {
-  return copyTrack(frames.filter((_, i) => !indices.has(i)));
+  const kept: Frame[] = [];
+  let previous = -1;
+  for (let i = 0; i < frames.length; i++) {
+    if (indices.has(i)) continue;
+    const frame = { ...frames[i] };
+    if (previous >= 0 && i > previous + 1) {
+      kept[kept.length - 1].settle = true;
+      frame.settle = true;
+    }
+    kept.push(frame);
+    previous = i;
+  }
+  return copyTrack(kept);
 }
 
 // An interior insertion retains the interval leading out of the preceding frame.
@@ -111,20 +124,33 @@ export function insertFrames(frames: Frame[], index: number, additions: Frame[],
       frames.reduce((sum, frame) => sum + frame.ms, addedDuration) > 600000) {
     throw Error('请输入有效的七轴角度和正整数衔接间隔，整段最长 10 分钟、最多 10000 帧');
   }
-  const result = frames.map((frame) => ({ q: frame.q.slice(), ms: frame.ms }));
+  const result = frames.map((frame) => ({ ...frame, q: frame.q.slice() }));
   const appended = index === result.length;
   if (appended) result[index - 1].ms = interval;
   result.splice(index, 0, ...additions.map((frame, i) => ({
+    ...frame,
     q: frame.q.slice(),
     ms: i < additions.length - 1 ? frame.ms : appended ? 0 : interval,
   })));
   return result;
 }
 
-export function frameTable(frames: Frame[], start: number[]): string {
+export function interpolatePlanned(points: Planned[], time: number): number[] {
+  const near = nearest(points, time, (point) => point[0]);
+  const right = points[near][0] < time ? near + 1 : near;
+  if (right <= 0) return points[0][4];
+  if (right >= points.length) return points[points.length - 1][4];
+  const left = points[right - 1];
+  const next = points[right];
+  if (next[0] <= left[0]) return next[4];
+  const fraction = (time - left[0]) / (next[0] - left[0]);
+  return left[4].map((angle, axis) => angle + fraction * (next[4][axis] - angle));
+}
+
+export function frameTable(frames: Frame[], start: number[], intervals = frames.map((frame) => frame.ms)): string {
   const rows = frames.map((frame, i) => {
     const angles = (i ? frame.q : start).map((angle) => `Angle{${angle.toExponential(8)}f}`).join(', ');
-    return `        {Target{{${angles}}}, Duration{${frame.ms * 1000}.0f}},`;
+    return `        {Target{{${angles}}}, Duration{${(i === 0 ? 0 : intervals[i - 1]) * 1000}.0f}},`;
   });
   return [
     'inline constexpr auto taughtFrames = [] {',

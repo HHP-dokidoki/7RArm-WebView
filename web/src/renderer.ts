@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import type { ArmState, Side } from './types';
-import type { Preview } from './teach';
+import { nearest, type Preview } from './teach';
 import { SIDES } from './types';
 import type { DeployIK } from './wasm';
 
@@ -41,6 +41,10 @@ export class ArmRenderer {
   private teachLines: THREE.Line<THREE.BufferGeometry, THREE.LineBasicMaterial>[] = [];
   private teachActive = false;
   private teachPoints: THREE.Vector3[] = [];
+  private teachPlanned: { point: THREE.Vector3; index: number }[] = [];
+  private curveSelection = false;
+  private curveDrag?: { pointer: number; start: number; end: number };
+  onSelectTeachRange?: (start: number, end: number) => void;
   private pickDown?: { x: number; y: number };
   private teachSelection?: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>;
   onPickTeachFrame?: (index: number, toggleSelection: boolean) => void;
@@ -116,27 +120,50 @@ export class ArmRenderer {
       { capture: true },
     );
 
-    this.renderer.domElement.addEventListener('pointerdown', (event) => {
-      if (event.button === 0) this.pickDown = { x: event.clientX, y: event.clientY };
+    const canvas = this.renderer.domElement;
+    canvas.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0) return;
+      if (this.teachActive && this.curveSelection && !event.altKey) {
+        const index = this.pickTeachFrame(event, 18, true);
+        if (index >= 0) {
+          this.curveDrag = { pointer: event.pointerId, start: index, end: index };
+          canvas.setPointerCapture(event.pointerId);
+          event.stopImmediatePropagation();
+          return;
+        }
+      }
+      this.pickDown = { x: event.clientX, y: event.clientY };
+    }, { capture: true });
+    canvas.addEventListener('pointermove', (event) => {
+      const drag = this.curveDrag;
+      if (!drag || drag.pointer !== event.pointerId) return;
+      event.stopImmediatePropagation();
+      const index = this.pickTeachFrame(event, 30, true);
+      if (index < 0 || index === drag.end) return;
+      drag.end = index;
+      this.updateTeachRange(drag.start, index);
+    }, { capture: true });
+    canvas.addEventListener('lostpointercapture', (event) => {
+      if (this.curveDrag?.pointer === event.pointerId) this.curveDrag = undefined;
     });
-    this.renderer.domElement.addEventListener('pointercancel', () => { this.pickDown = undefined; });
-    this.renderer.domElement.addEventListener('pointerup', (event) => {
+    canvas.addEventListener('pointercancel', () => { this.pickDown = undefined; });
+    canvas.addEventListener('pointerup', (event) => {
+      const drag = this.curveDrag;
+      if (drag?.pointer === event.pointerId) {
+        event.stopImmediatePropagation();
+        this.curveDrag = undefined;
+        const index = this.pickTeachFrame(event, 30, true);
+        const end = index >= 0 ? index : drag.end;
+        if (!this.updateTeachRange(drag.start, end)) this.onPickTeachFrame?.(end, false);
+        return;
+      }
       const origin = this.pickDown;
       this.pickDown = undefined;
       if (!this.teachActive || event.button !== 0 || !origin ||
           Math.hypot(event.clientX - origin.x, event.clientY - origin.y) > 4) return;
-      const bounds = this.renderer.domElement.getBoundingClientRect();
-      let distance = 14;
-      let selected = -1;
-      this.teachPoints.forEach((point, i) => {
-        const screen = point.clone().project(this.camera);
-        const x = bounds.left + (screen.x + 1) * bounds.width / 2;
-        const y = bounds.top + (1 - screen.y) * bounds.height / 2;
-        const next = Math.hypot(x - event.clientX, y - event.clientY);
-        if (next < distance) { distance = next; selected = i; }
-      });
+      const selected = this.pickTeachFrame(event, 14, false);
       if (selected >= 0) this.onPickTeachFrame?.(selected, event.ctrlKey || event.metaKey || event.shiftKey);
-    });
+    }, { capture: true });
 
     // Lights
     this.hemiLight = new THREE.HemisphereLight(0xffffff, 0xd0d7de, 2.4);
@@ -366,14 +393,66 @@ export class ArmRenderer {
     return nowVisible;
   }
 
+  setCurveSelection(active: boolean): void {
+    this.curveSelection = active;
+    if (!active) this.curveDrag = undefined;
+    this.renderer.domElement.classList.toggle('teach-curve-cursor', active);
+  }
+
+  private updateTeachRange(start: number, end: number): boolean {
+    if (start === end) return false;
+    this.onSelectTeachRange?.(Math.min(start, end), Math.max(start, end));
+    return true;
+  }
+
+  private pickTeachFrame(event: PointerEvent, radius: number, alongCurve: boolean): number {
+    const bounds = this.renderer.domElement.getBoundingClientRect();
+    const pointer = new THREE.Vector2(event.clientX, event.clientY);
+    const project = (point: THREE.Vector3) => {
+      const clip = point.clone().project(this.camera);
+      return new THREE.Vector2(bounds.left + (clip.x + 1) * bounds.width / 2,
+        bounds.top + (1 - clip.y) * bounds.height / 2);
+    };
+    let distance = radius;
+    let selected = -1;
+    const consider = (position: THREE.Vector2, index: number) => {
+      const d = position.distanceTo(pointer);
+      if (d < distance) { distance = d; selected = index; }
+    };
+    const path = (points: { point: THREE.Vector3; index: number }[]) => {
+      let previous: THREE.Vector2 | undefined;
+      points.forEach(({ point, index }, i) => {
+        const position = project(point);
+        consider(position, index);
+        if (alongCurve && previous) {
+          const difference = position.clone().sub(previous);
+          const length = difference.lengthSq();
+          if (length > 0) {
+            const portion = THREE.MathUtils.clamp(pointer.clone().sub(previous).dot(difference) / length, 0, 1);
+            consider(previous.clone().addScaledVector(difference, portion), portion < 0.5 ? points[i - 1].index : index);
+          }
+        }
+        previous = position;
+      });
+    };
+    path(this.teachPoints.map((point, index) => ({ point, index })));
+    if (alongCurve) path(this.teachPlanned);
+    return selected;
+  }
+
   setTeachPaths(preview: Preview, start: number, end: number, selected: ReadonlySet<number>): void {
     this.removeTeachPaths();
     const project = (point: [number, number, number, number, ...unknown[]]) =>
       new THREE.Vector3(point[1], point[2], point[3]).multiplyScalar(1000);
     this.teachPoints = preview.recorded.map(project);
+    const planned = preview.planned.map(project);
+    this.teachPlanned = preview.rejected ? [] : planned.map((point, i) => ({
+      point,
+      index: nearest(preview.frameTimes, preview.planned[i][0] * 1000, (time) => time),
+    }));
     for (const [points, color] of [
       [this.teachPoints, 0x64748b],
-      [preview.planned.map(project), 0x08916f],
+      [planned, 0x08916f],
       [this.teachPoints.slice(start, end + 1), 0xf78e13],
     ] as const) {
       if (points.length < 2) continue;
@@ -411,6 +490,7 @@ export class ArmRenderer {
     }
     this.teachLines = [];
     this.teachPoints = [];
+    this.teachPlanned = [];
     this.setTeachSelection(new Set());
   }
 

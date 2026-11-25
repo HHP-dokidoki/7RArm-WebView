@@ -1,5 +1,5 @@
 import type { ArmRenderer } from '../../renderer';
-import { deleteFrames, editFrameRange, frameTable, insertFrames, nearest, parseRecording, resample, sample, splitTrack } from '../../teach';
+import { deleteFrames, editFrameRange, frameTable, insertFrames, interpolatePlanned, nearest, parseRecording, resample, sample, splitTrack } from '../../teach';
 import type { Frame, Preview, Sample } from '../../teach';
 import type { Side } from '../../types';
 
@@ -57,7 +57,7 @@ export class TeachDock {
         <button class="btn btn-secondary btn-sm" data-teach="resample">重新采样</button>
       </div>
       <h3>七轴姿态</h3>
-      <select class="form-select" aria-label="预览姿态来源" data-teach="pose"><option value="recorded">采样姿态</option><option value="planned">规划姿态</option></select>
+      <select class="form-select" aria-label="预览姿态来源" data-teach="pose"><option value="planned">规划姿态</option><option value="recorded">采样关键帧</option></select>
       <div class="teach-joints">${Array.from({ length: 7 }, (_, i) => `
         <label>J${i}<input type="range" min="-180" max="270" step="0.1" data-teach="joint-${i}" disabled>
         <output data-teach="angle-${i}">—</output></label>`).join('')}</div>
@@ -87,6 +87,7 @@ export class TeachDock {
         <button class="btn btn-ghost btn-sm" data-teach="undo" disabled>撤销编辑</button>
       </div>
       <div class="teach-range teach-edit-actions teach-batch">
+        <button class="btn btn-secondary btn-sm" data-teach="drag-curve" aria-pressed="false" title="开关曲线拖选模式" disabled>拖选曲线</button>
         <button class="btn btn-secondary btn-sm" data-teach="mark-point" disabled>标记当前点</button>
         <button class="btn btn-secondary btn-sm" data-teach="mark-range" disabled>标记选段</button>
         <span data-teach="marked-count" aria-live="polite">已标记 0 帧</span>
@@ -99,9 +100,20 @@ export class TeachDock {
     this.renderer.onPickTeachFrame = (index, toggleSelection) => {
       if (!this.visible || !this.preview) return;
       this.stop();
-      this.select('pose').value = 'recorded';
       this.seek(this.times[index]);
       if (toggleSelection && !this.capture) this.togglePoint(index);
+    };
+    this.renderer.onSelectTeachRange = (start, end) => {
+      this.stop();
+      this.start = start;
+      this.end = end;
+      this.seek(this.times[start]);
+      this.sync();
+      this.drawPaths();
+    };
+    this.button('drag-curve').onclick = () => {
+      const button = this.button('drag-curve');
+      this.setCurveSelection(button.getAttribute('aria-pressed') !== 'true');
     };
     workspace.append(this.panel);
     root.append(this.timeline);
@@ -196,7 +208,7 @@ export class TeachDock {
     this.panel.hidden = this.timeline.hidden = !visible;
     this.stop();
     if (visible) { this.drawPaths(); this.drawPose(); }
-    else { this.waypointDialog.close(); this.renderer.clearTeach(); }
+    else { this.setCurveSelection(false); this.waypointDialog.close(); this.renderer.clearTeach(); }
   }
 
   private toggleRecord(): void {
@@ -320,7 +332,7 @@ export class TeachDock {
     this.request = request;
     let elapsed = 0;
     this.times = this.frames.map((_, i) => {
-      if (i) elapsed += Math.floor(this.frames[i - 1].ms / 2) * 2 + 2;
+      if (i) elapsed += Math.ceil(this.frames[i - 1].ms / 2) * 2;
       return elapsed / 1000;
     });
     this.preview = null;
@@ -328,15 +340,16 @@ export class TeachDock {
     this.status('计算轨迹…');
     const pitch = this.input('pitch').valueAsNumber;
     const body = [
-      [this.select('side').value, Number(this.input('safe').checked), Number(this.input('tool').checked), pitch, this.frames.length].join(' '),
-      ...this.frames.map((frame) => [frame.ms, ...frame.q].join(' ')),
+      [this.select('side').value, Number(this.input('safe').checked), Number(this.input('tool').checked), pitch, this.frames.length, 1].join(' '),
+      ...this.frames.map((frame) => [frame.ms, Number(!!frame.settle), ...frame.q].join(' ')),
     ].join('\n');
     void fetch('/api/teach-preview', { method: 'POST', body, signal: request.signal }).then(async (response) => {
       if (!response.ok) throw Error(await response.text());
       const result: Preview = await response.json();
       if (request.signal.aborted) return;
-      if (result.model?.length !== 7 || result.tcpBasis?.length !== 3) throw Error('请重新编译原生轨迹预览程序');
+      if (result.model?.length !== 7 || result.tcpBasis?.length !== 3 || result.intervals?.length !== this.frames.length || result.frameTimes?.length !== this.frames.length) throw Error('请重新编译原生轨迹预览程序');
       this.preview = result;
+      if (!result.rejected) this.times = result.frameTimes.map((time) => time / 1000);
       this.clock = clamp(this.clock, 0, this.maxTime());
       this.sync();
       this.drawPaths();
@@ -345,6 +358,7 @@ export class TeachDock {
         `${this.frames.length} 帧`,
         this.tracks.length > 1 ? `MCU 时间戳回退，已切成 ${this.tracks.length} 段` : '',
         this.truncated ? '已跳过截断末行' : '',
+        result.intervals.some((ms, i) => ms > this.frames[i].ms) ? '删段衔接已按规划所需时间延长' : '',
         result.rejected ? `规划拒绝第 ${result.rejected} 帧，可查看采样姿态` : '',
       ].filter(Boolean).join(' · '), !!result.rejected);
     }).catch((error: Error) => {
@@ -363,7 +377,7 @@ export class TeachDock {
     if (!this.preview || this.capture) return null;
     if (this.select('pose').value === 'planned' && this.preview.planned.length) {
       const points = this.preview.planned;
-      return { q: points[nearest(points, this.clock, (point) => point[0])][4], index: -1 };
+      return { q: interpolatePlanned(points, this.clock), index: -1 };
     }
     const index = nearest(this.times, this.clock, (time) => time);
     return { q: this.frames[index].q, index };
@@ -441,6 +455,11 @@ export class TeachDock {
       update((end ? this.end : this.start) + (event.key === 'ArrowLeft' ? -1 : 1));
     };
   }
+  private setCurveSelection(active: boolean): void {
+    this.button('drag-curve').setAttribute('aria-pressed', String(active));
+    this.renderer.setCurveSelection(active);
+  }
+
   private currentFrame(): number {
     return nearest(this.times, this.clock, (time) => time);
   }
@@ -454,6 +473,8 @@ export class TeachDock {
   private syncMarks(): void {
     const editable = !!this.preview && !this.capture;
     for (const key of ['mark-point', 'mark-range', 'waypoint', 'copy-range', 'match-end']) this.button(key).disabled = !editable;
+    this.button('drag-curve').disabled = !editable;
+    if (!editable) this.setCurveSelection(false);
     this.button('clear-marks').disabled = this.selected.size === 0;
     this.button('batch-delete').disabled = !editable || !this.selected.size ||
       this.frames.length - this.selected.size < 2;
@@ -478,6 +499,7 @@ export class TeachDock {
     const remaining = deleteFrames(this.frames, this.selected);
     this.rememberEdit();
     this.frames = remaining;
+    this.select('pose').value = 'planned';
     this.selected.clear();
     this.start = clamp(first - 1, 0, remaining.length - 2);
     this.end = this.start + 1;
@@ -493,7 +515,7 @@ export class TeachDock {
     this.selected = new Set([...this.selected].map((i) => i < index ? i : i + additions.length));
     this.start = Math.min(index, this.frames.length - 2);
     this.end = Math.max(this.start + 1, index + additions.length - 1);
-    this.clock = this.frames.slice(0, index).reduce((t, frame) => t + Math.floor(frame.ms / 2) * 2 + 2, 0) / 1000;
+    this.clock = this.frames.slice(0, index).reduce((t, frame) => t + Math.ceil(frame.ms / 2) * 2, 0) / 1000;
     this.select('pose').value = 'recorded';
     this.replan();
   }
@@ -584,6 +606,7 @@ export class TeachDock {
       const replacement = editFrameRange(this.frames, this.start, this.end, operation);
       this.rememberEdit();
       this.frames = replacement;
+      this.select('pose').value = 'planned';
       this.selected.clear();
       if (operation === 'crop') {
         this.start = 0;
@@ -614,6 +637,7 @@ export class TeachDock {
   }
   private togglePlay(): void {
     if (this.playback) { this.stop(); return; }
+    if (this.preview?.planned.length) this.select('pose').value = 'planned';
     if (this.clock >= this.maxTime()) this.clock = 0;
     const start = performance.now() - this.clock * 1000;
     this.button('play').textContent = '暂停';
@@ -631,7 +655,7 @@ export class TeachDock {
   }
   private export(): void {
     if (!this.preview || this.preview.rejected) return;
-    const url = URL.createObjectURL(new Blob([frameTable(this.frames, this.preview.start)], { type: 'text/plain' }));
+    const url = URL.createObjectURL(new Blob([frameTable(this.frames, this.preview.start, this.preview.intervals)], { type: 'text/plain' }));
     const link = document.createElement('a');
     link.href = url;
     link.download = 'taught_frames.hpp';

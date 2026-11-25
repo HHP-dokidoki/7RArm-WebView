@@ -3,6 +3,8 @@
 #include "Runtime/Eng27/Profiles.hpp"
 #include <iomanip>
 #include <iostream>
+#include <sstream>
+#include <string>
 #include <vector>
 
 using namespace ConceptArm;
@@ -11,6 +13,7 @@ using Angles = JointAngles<7>;
 struct Frame {
     Angles q;
     unsigned intervalMs;
+    bool settle{};
 };
 
 void writeAngles(Angles const& q) {
@@ -28,12 +31,27 @@ int main() {
     if (!(std::cin >> side >> safe >> payload >> pitchDeg >> count) ||
         (side != 0 && side != 1) || !std::isfinite(pitchDeg) ||
         std::abs(pitchDeg) > 180 || count < 2 || count > 10000) return 1;
+    // The optional header flag adds one settle bit after the interval field.
+    std::string headerTail;
+    std::getline(std::cin, headerTail);
+    std::istringstream header{headerTail};
+    bool withSettle = false;
+    if (header >> std::ws; !header.eof()) {
+        int version;
+        if (!(header >> version) || version != 1) return 1;
+        withSettle = true;
+    }
     std::vector<Frame> frames(count);
     unsigned totalMs = 0;
     for (std::size_t i = 0; i < count; ++i) {
         auto& frame = frames[i];
         if (!(std::cin >> frame.intervalMs) || frame.intervalMs > 600000 ||
             (i + 1 < count && frame.intervalMs == 0)) return 1;
+        if (withSettle) {
+            int settle;
+            if (!(std::cin >> settle) || (settle != 0 && settle != 1)) return 1;
+            frame.settle = settle == 1;
+        }
         totalMs += frame.intervalMs;
         if (totalMs > 600000) return 1;
         for (auto& angle : frame.q) {
@@ -99,6 +117,7 @@ int main() {
     Angles target = frames.front().q;
     unsigned submittedMs = 0;
     unsigned clockMs = 0;
+    std::vector<unsigned> frameTimes(count);
     bool first = true;
     std::cout << "],\"planned\":[";
     auto sample = [&](float elapsed) {
@@ -118,8 +137,22 @@ int main() {
     std::size_t rejected = std::holds_alternative<Error>(initial) ? 1 : 0;
     for (std::size_t i = 1; i < count && !rejected; ++i) {
         unsigned const previousMs = clockMs;
-        // StoreFetch checks strictly greater on the nominal 2 ms FSM cadence.
-        clockMs += (frames[i - 1].intervalMs / 2 + 1) * 2;
+        auto& previous = frames[i - 1];
+        if (previous.settle) {
+            float const remaining = active.duration - static_cast<float>(clockMs - submittedMs) / 1000.0f;
+            if (remaining > 0.0f) {
+                auto const neededMs = static_cast<unsigned>(std::ceil(remaining * 1000.0f));
+                if (neededMs > previous.intervalMs) {
+                    totalMs += neededMs - previous.intervalMs;
+                    if (totalMs > 600000) return 1;
+                    previous.intervalMs = neededMs;
+                }
+            }
+        }
+        // StoreFetch submits when elapsed >= the incoming target's duration.
+        // The request stores intervals after each frame; export shifts them by one.
+        clockMs += ((previous.intervalMs + 1) / 2) * 2;
+        frameTimes[i] = clockMs;
         float const elapsed = static_cast<float>(clockMs - submittedMs) / 1000.0f;
         for (float offset = static_cast<float>(previousMs - submittedMs) / 1000.0f;
              offset < elapsed; offset += 0.02f) sample(offset);
@@ -139,6 +172,12 @@ int main() {
         for (float offset = sinceSubmission; offset < active.duration; offset += 0.02f) sample(offset);
         sample(std::max(sinceSubmission, active.duration));
     }
+    std::cout << "],\"intervals\":[";
+    for (std::size_t i = 0; i < count; ++i)
+        std::cout << (i ? "," : "") << frames[i].intervalMs;
+    std::cout << "],\"frameTimes\":[";
+    for (std::size_t i = 0; i < count; ++i)
+        std::cout << (i ? "," : "") << frameTimes[i];
     std::cout << "],\"submitted\":" << static_cast<float>(clockMs) / 1000.0f
               << ",\"end\":" << end << ",\"rejected\":" << rejected << "}\n";
 }

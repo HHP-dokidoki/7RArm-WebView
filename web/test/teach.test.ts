@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deleteFrames, editFrameRange, frameTable, insertFrames, parseRecording, resample, splitTrack } from '../src/teach';
+import { deleteFrames, editFrameRange, frameTable, insertFrames, interpolatePlanned, parseRecording, resample, splitTrack } from '../src/teach';
 
 const header = 'mcu_us,host_t,v0,v1,v2,v3,v4,v5,v6,v7';
 const row = (us: number, side: number, q: number) => `${us},1,${side},${q},-0.7,0,0.8,0,0,0`;
@@ -33,7 +33,7 @@ describe('HostLink recordings', () => {
   it('removes selected frames, preserves adjacent intervals and rejects a one-frame result', () => {
     const frames = [10, 20, 30, 40, 0].map((ms, i) => ({ q: [i], ms }));
     expect(editFrameRange(frames, 1, 2, 'delete')).toEqual([
-      { q: [0], ms: 10 }, { q: [3], ms: 40 }, { q: [4], ms: 0 },
+      { q: [0], ms: 10, settle: true }, { q: [3], ms: 40, settle: true }, { q: [4], ms: 0 },
     ]);
     expect(editFrameRange(frames, 3, 4, 'delete').at(-1)?.ms).toBe(0);
     expect(() => editFrameRange(frames, 0, 3, 'delete')).toThrow('至少需要两帧');
@@ -42,7 +42,7 @@ describe('HostLink recordings', () => {
   it('deletes disjoint point and segment selections together', () => {
     const frames = [10, 20, 30, 40, 50, 0].map((ms, i) => ({ q: [i], ms }));
     expect(deleteFrames(frames, new Set([1, 3, 4]))).toEqual([
-      { q: [0], ms: 10 }, { q: [2], ms: 30 }, { q: [5], ms: 0 },
+      { q: [0], ms: 10, settle: true }, { q: [2], ms: 30, settle: true }, { q: [5], ms: 0, settle: true },
     ]);
   });
 
@@ -58,10 +58,17 @@ describe('HostLink recordings', () => {
     expect(frames[1].ms).toBe(0);
   });
 
+  it('interpolates between the planner samples during playback', () => {
+    expect(interpolatePlanned([[0, 0, 0, 0, [0]], [0.02, 0, 0, 0, [1]], [0.04, 0, 0, 0, [2]]], 0.025)[0])
+      .toBeCloseTo(1.25);
+  });
+
   it('exports scoped aliases and frame intervals in microseconds', () => {
     const q = [0, 0, 0, 0, 0, 0, 0];
     const output = frameTable([{ q, ms: 12 }, { q, ms: 0 }], q);
     expect(output).toContain('using Target = ConceptArm::JointTarget<7>;');
-    expect(output).toContain('Duration{12000.0f}');
+    const first = output.indexOf('Duration{0.0f}');
+    expect(first).toBeGreaterThan(0);
+    expect(output.indexOf('Duration{12000.0f}')).toBeGreaterThan(first);
   });
 });
